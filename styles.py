@@ -16,7 +16,10 @@ def _safe(text: str) -> str:
 
 
 def render_briefing_card(intake_data: dict, specialty: str):
-    """Render the Doctor's Briefing Card using native Streamlit components."""
+    """Render the Doctor's Briefing Card using native Streamlit components.
+    
+    specialty can be a single name or multiple joined with ' + '.
+    """
 
     # Extract data with safe defaults
     patient_summary = intake_data.get("patient_summary", "No summary available")
@@ -31,18 +34,22 @@ def render_briefing_card(intake_data: dict, specialty: str):
     # Timestamp
     timestamp = datetime.now().strftime("%B %d, %Y at %I:%M %p")
 
+    # Parse multiple specialties
+    specialties = [s.strip() for s in specialty.split("+") if s.strip()]
+
     # Card container
     with st.container(border=True):
         # Header
-        col_title, col_badge = st.columns([3, 1])
-        with col_title:
-            st.markdown("### 📋 Doctor's Briefing Card")
-        with col_badge:
-            st.markdown(
-                f'<span style="background-color:#0D9488;color:white;padding:0.3rem 0.8rem;'
-                f'border-radius:20px;font-size:0.85rem;font-weight:500;">{_safe(specialty)}</span>',
-                unsafe_allow_html=True,
-            )
+        st.markdown("### 📋 Doctor's Briefing Card")
+
+        # Specialty badges (one per specialty, teal pills)
+        badges_html = " ".join(
+            f'<span style="background-color:#0D9488;color:white;padding:0.3rem 0.8rem;'
+            f'border-radius:20px;font-size:0.82rem;font-weight:500;margin-right:0.4rem;'
+            f'display:inline-block;margin-bottom:0.3rem;">{_safe(s)}</span>'
+            for s in specialties
+        )
+        st.markdown(badges_html, unsafe_allow_html=True)
 
         st.divider()
 

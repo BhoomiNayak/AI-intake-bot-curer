@@ -73,10 +73,12 @@ class CurerPDF(FPDF):
         self.ln(4)
 
     def add_specialty_badge(self, specialty: str):
-        """Add specialty badge below header."""
+        """Add specialty badge(s) below header. Supports 'Spec1 + Spec2' format."""
+        specialties = [s.strip() for s in specialty.split("+") if s.strip()]
         self.set_font("Helvetica", "B", 11)
         self.set_text_color(13, 148, 136)
-        self.cell(0, 8, f"Specialty: {specialty}", new_x="LMARGIN", new_y="NEXT")
+        label = "Specialties" if len(specialties) > 1 else "Specialty"
+        self.cell(0, 8, f"{label}: {', '.join(specialties)}", new_x="LMARGIN", new_y="NEXT")
         self.ln(4)
 
     def add_severity_indicator(self, severity: str):
@@ -145,14 +147,14 @@ def generate_pdf(intake_data: dict, specialty: str) -> bytes | None:
         return bytes(pdf_output)
 
     except Exception as e:
-        st.error("⚠️ Error generating PDF. Please try resetting the conversation.")
+        st.error("Error generating PDF. Please try resetting the conversation.")
         return None
 
 
 def get_download_button(pdf_bytes: bytes):
     """Render a Streamlit download button for the PDF."""
     st.download_button(
-        label="📄 Download Briefing Card (PDF)",
+        label=" Download Briefing Card (PDF)",
         data=pdf_bytes,
         file_name=f"curer_briefing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         mime="application/pdf",

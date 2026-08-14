@@ -5,7 +5,7 @@ import streamlit as st
 from groq import Groq
 from dotenv import load_dotenv
 
-from prompts import get_system_prompt
+from prompts import get_combined_prompt, ALL_SPECIALTIES, MAX_SPECIALTIES
 
 # Load .env file
 load_dotenv()
@@ -18,23 +18,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Constants ---
-SPECIALTIES = [
-    "General Practitioner (GP)",
-    "Cardiology",
-    "Dermatology",
-    "Orthopedics",
-    "Pediatrics",
-    "Gynecology",
-]
-
 # --- Conversation Guardrails ---
-MAX_USER_TURNS = 10  # Max messages a user can send before forced completion
-MAX_INPUT_LENGTH = 1000  # Max characters per user message
-MAX_TOTAL_CONVERSATION_TOKENS = 8000  # Approximate token budget
-MIN_INPUT_LENGTH = 2  # Minimum meaningful input
+MAX_USER_TURNS = 10
+MAX_INPUT_LENGTH = 1000
+MAX_TOTAL_CONVERSATION_TOKENS = 8000
+MIN_INPUT_LENGTH = 2
 
-# Patterns indicating prompt injection or abuse attempts
 ABUSE_PATTERNS = [
     r"ignore\s+(previous|above|all)\s+(instructions?|prompts?)",
     r"you\s+are\s+now\s+(a|an)\s+",
@@ -69,8 +58,8 @@ def init_session_state():
         st.session_state.intake_complete = False
     if "intake_data" not in st.session_state:
         st.session_state.intake_data = None
-    if "selected_specialty" not in st.session_state:
-        st.session_state.selected_specialty = SPECIALTIES[0]
+    if "selected_specialties" not in st.session_state:
+        st.session_state.selected_specialties = []
     if "conversation_started" not in st.session_state:
         st.session_state.conversation_started = False
     if "email_sent_to" not in st.session_state:
@@ -97,27 +86,19 @@ def reset_conversation():
 
 # --- Guardrail Functions ---
 def validate_user_input(text: str) -> tuple[bool, str]:
-    """
-    Validate user input for length, content, and abuse patterns.
-
-    Returns (is_valid, error_message).
-    """
-    # Check minimum length
+    """Validate user input for length, content, and abuse patterns."""
     if len(text.strip()) < MIN_INPUT_LENGTH:
         return False, "Please provide a more detailed response."
 
-    # Check maximum length
     if len(text) > MAX_INPUT_LENGTH:
         return False, f"Message too long. Please keep your response under {MAX_INPUT_LENGTH} characters."
 
-    # Check for prompt injection / abuse patterns
     if ABUSE_REGEX.search(text):
         st.session_state.abuse_warnings += 1
         if st.session_state.abuse_warnings >= 3:
             return False, "Session terminated due to repeated misuse. Please reset and use the app as intended."
         return False, "Please keep your responses relevant to your health concern."
 
-    # Check max turns
     if st.session_state.user_turn_count >= MAX_USER_TURNS:
         return False, "Maximum conversation length reached. The AI will now generate your briefing."
 
@@ -127,16 +108,13 @@ def validate_user_input(text: str) -> tuple[bool, str]:
 def check_conversation_budget() -> bool:
     """Check if conversation is within token budget (approximate)."""
     total_chars = sum(len(m["content"]) for m in st.session_state.messages)
-    # Rough estimate: 1 token ~ 4 chars
     estimated_tokens = total_chars // 4
     return estimated_tokens < MAX_TOTAL_CONVERSATION_TOKENS
 
 
 def sanitize_input(text: str) -> str:
-    """Basic input sanitization — strip control characters, normalize whitespace."""
-    # Remove null bytes and control characters (keep newlines/tabs)
+    """Basic input sanitization."""
     cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-    # Normalize excessive whitespace
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r" {3,}", "  ", cleaned)
     return cleaned.strip()
@@ -153,17 +131,14 @@ def parse_intake_json(text: str) -> dict | None:
         end_idx = text.index(end_marker)
         json_str = text[start_idx:end_idx].strip()
 
-        # Guard against oversized JSON payloads (max 5KB)
         if len(json_str) > 5000:
             return None
 
         try:
             data = json.loads(json_str)
-            # Validate expected keys exist
             required_keys = {"patient_summary", "chief_complaint", "symptoms"}
             if not required_keys.issubset(data.keys()):
                 return None
-            # Validate types
             if not isinstance(data.get("symptoms"), list):
                 return None
             return data
@@ -177,16 +152,24 @@ def get_display_text(text: str) -> str:
     start_marker = "<<<INTAKE_COMPLETE>>>"
     if start_marker in text:
         text = text[:text.index(start_marker)].strip()
-    # Strip any raw HTML tags from AI output to prevent XSS via LLM injection
     text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<iframe[^>]*>.*?</iframe>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"on\w+\s*=\s*[\"'][^\"']*[\"']", "", text, flags=re.IGNORECASE)
     return text
 
 
-def stream_chat_response(client: Groq, specialty: str):
+def get_specialty_label(specialties: list[str]) -> str:
+    """Get a display label for the selected specialties."""
+    if not specialties:
+        return "General"
+    if len(specialties) == 1:
+        return specialties[0]
+    return " + ".join(specialties)
+
+
+def stream_chat_response(client: Groq, specialties: list[str]):
     """Stream a chat response from Groq and handle intake completion."""
-    system_prompt = get_system_prompt(specialty)
+    system_prompt = get_combined_prompt(specialties)
 
     messages_for_api = [{"role": "system", "content": system_prompt}]
     messages_for_api.extend(
@@ -208,18 +191,15 @@ def stream_chat_response(client: Groq, specialty: str):
         for chunk in stream:
             if chunk.choices[0].delta.content is not None:
                 full_response += chunk.choices[0].delta.content
-                # Display without JSON markers
                 display_text = get_display_text(full_response)
                 if display_text:
                     response_placeholder.markdown(display_text)
 
-        # Check if intake is complete
         intake_data = parse_intake_json(full_response)
         if intake_data:
             st.session_state.intake_complete = True
             st.session_state.intake_data = intake_data
 
-        # Store the full response
         st.session_state.messages.append(
             {"role": "assistant", "content": full_response}
         )
@@ -228,7 +208,6 @@ def stream_chat_response(client: Groq, specialty: str):
 
     except Exception as e:
         error_msg = str(e)
-        # Don't expose internal details to user — log-safe generic message
         if "api_key" in error_msg.lower() or "auth" in error_msg.lower():
             st.error("⚠️ API authentication error. Please check your Groq API key.")
         elif "rate" in error_msg.lower() or "limit" in error_msg.lower():
@@ -258,13 +237,17 @@ def render_sidebar():
         st.markdown("### How it works")
         st.markdown(
             """
-            1. **Select** your doctor's specialty
-            2. **Answer** 3-4 tailored questions from the AI
+            1. **Select** up to 3 specialties
+            2. **Answer** 3-5 tailored questions from the AI
             3. **Receive** a Doctor's Briefing Card
             4. **Briefing auto-sent** to your doctor via email
             5. **Download** the PDF for your records
             """
         )
+        st.divider()
+
+        st.markdown("### Specialties Available")
+        st.caption(f"{len(ALL_SPECIALTIES)} specialties • Select up to {MAX_SPECIALTIES}")
         st.divider()
 
         st.markdown("### About")
@@ -277,7 +260,6 @@ def render_sidebar():
         )
         st.divider()
 
-        # Show conversation stats
         if st.session_state.get("conversation_started", False):
             turns = st.session_state.get("user_turn_count", 0)
             st.caption(f"Messages sent: {turns}/{MAX_USER_TURNS}")
@@ -328,15 +310,16 @@ def main():
 
     client = Groq(api_key=api_key)
 
-    # --- Specialty Selection ---
-    col1, col2 = st.columns([3, 1])
+    # --- Specialty Selection (Multi-select) ---
+    col1, col2 = st.columns([4, 1])
     with col1:
-        selected_specialty = st.selectbox(
-            "Select your consultation specialty:",
-            options=SPECIALTIES,
-            index=SPECIALTIES.index(st.session_state.selected_specialty),
+        selected_specialties = st.multiselect(
+            "Select consultation specialties (up to 3):",
+            options=ALL_SPECIALTIES,
+            default=st.session_state.selected_specialties if st.session_state.selected_specialties else None,
+            max_selections=MAX_SPECIALTIES,
             disabled=st.session_state.conversation_started,
-            help="Choose the type of doctor you're seeing. Locked once the conversation starts.",
+            help="Choose 1-3 specialties. The AI will ask questions relevant to all selected areas.",
         )
     with col2:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -344,9 +327,14 @@ def main():
             reset_conversation()
             st.rerun()
 
-    # Update specialty in session if changed before conversation starts
+    # Update specialties in session if changed before conversation starts
     if not st.session_state.conversation_started:
-        st.session_state.selected_specialty = selected_specialty
+        st.session_state.selected_specialties = selected_specialties
+
+    # Require at least one specialty
+    if not st.session_state.selected_specialties and not st.session_state.conversation_started:
+        st.info("👆 Please select at least one specialty to begin the intake.")
+        st.stop()
 
     st.divider()
 
@@ -363,13 +351,15 @@ def main():
         from pdf_generator import generate_pdf, get_download_button
         from email_sender import send_briefing_email, get_doctor_email
 
+        specialty_label = get_specialty_label(st.session_state.selected_specialties)
+
         st.divider()
-        render_briefing_card(st.session_state.intake_data, st.session_state.selected_specialty)
+        render_briefing_card(st.session_state.intake_data, specialty_label)
 
         # Generate PDF once and cache in session
         if st.session_state.pdf_bytes is None:
             st.session_state.pdf_bytes = generate_pdf(
-                st.session_state.intake_data, st.session_state.selected_specialty
+                st.session_state.intake_data, specialty_label
             )
 
         pdf_bytes = st.session_state.pdf_bytes
@@ -383,17 +373,17 @@ def main():
                     send_briefing_email(
                         recipient=doctor_email,
                         intake_data=st.session_state.intake_data,
-                        specialty=st.session_state.selected_specialty,
+                        specialty=specialty_label,
                         pdf_bytes=pdf_bytes,
                     )
                     st.session_state.email_sent_to = doctor_email
-                    st.success(f"✅ Briefing automatically sent to your doctor")
-                except ValueError as e:
-                    st.error(f"⚠️ Email configuration issue. Please contact support.")
+                    st.success("✅ Briefing automatically sent to your doctor")
+                except ValueError:
+                    st.error("⚠️ Email configuration issue. Please contact support.")
                 except RuntimeError:
-                    st.error(f"⚠️ Failed to send email. Please try again later.")
+                    st.error("⚠️ Failed to send email. Please try again later.")
                 except Exception:
-                    st.error(f"⚠️ An unexpected error occurred while sending the email.")
+                    st.error("⚠️ An unexpected error occurred while sending the email.")
 
         elif st.session_state.email_sent_to:
             st.success("✅ Briefing sent to your doctor")
@@ -408,40 +398,35 @@ def main():
     # --- Chat Input ---
     if not st.session_state.intake_complete:
         # Check if max turns reached — force completion
-        if st.session_state.user_turn_count >= MAX_USER_TURNS and not st.session_state.intake_complete:
+        if st.session_state.user_turn_count >= MAX_USER_TURNS:
             st.warning("Maximum conversation length reached. Generating your briefing now...")
-            # Add a hint to the AI to wrap up
             st.session_state.messages.append(
                 {"role": "user", "content": "Please generate my briefing summary now."}
             )
             with st.chat_message("assistant"):
-                stream_chat_response(client, st.session_state.selected_specialty)
+                stream_chat_response(client, st.session_state.selected_specialties)
             st.rerun()
 
         if prompt := st.chat_input(
             "Type your response here...",
             max_chars=MAX_INPUT_LENGTH,
         ):
-            # Sanitize input
             prompt = sanitize_input(prompt)
 
-            # Validate input
             is_valid, error_msg = validate_user_input(prompt)
             if not is_valid:
                 st.warning(f"⚠️ {error_msg}")
                 st.stop()
 
-            # Check conversation budget
             if not check_conversation_budget():
                 st.warning("Conversation is getting long. The AI will summarize your intake now.")
                 st.session_state.messages.append(
                     {"role": "user", "content": "Please generate my briefing summary now."}
                 )
                 with st.chat_message("assistant"):
-                    stream_chat_response(client, st.session_state.selected_specialty)
+                    stream_chat_response(client, st.session_state.selected_specialties)
                 st.rerun()
 
-            # Process valid input
             st.session_state.conversation_started = True
             st.session_state.user_turn_count += 1
             st.session_state.messages.append({"role": "user", "content": prompt})
@@ -450,7 +435,7 @@ def main():
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
-                stream_chat_response(client, st.session_state.selected_specialty)
+                stream_chat_response(client, st.session_state.selected_specialties)
 
             st.rerun()
 
@@ -458,7 +443,7 @@ def main():
     if not st.session_state.conversation_started and not st.session_state.messages:
         st.session_state.conversation_started = True
         with st.chat_message("assistant"):
-            stream_chat_response(client, st.session_state.selected_specialty)
+            stream_chat_response(client, st.session_state.selected_specialties)
         st.rerun()
 
 
